@@ -4,7 +4,6 @@ import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
-import com.hmdp.entity.Shop;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
@@ -13,10 +12,10 @@ import java.time.LocalDateTime;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 
-import static com.hmdp.utils.RedisConstants.CACHE_SHOP_KEY;
-import static com.hmdp.utils.RedisConstants.LOCK_SHOP_KEY;
+import static com.hmdp.utils.RedisConstants.*;
 
 /**
  * @auther wty
@@ -28,6 +27,7 @@ import static com.hmdp.utils.RedisConstants.LOCK_SHOP_KEY;
 @Slf4j
 public class CacheClient {
     private final StringRedisTemplate stringRedisTemplate;
+    private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
 
     public CacheClient(StringRedisTemplate stringRedisTemplate) {
         this.stringRedisTemplate = stringRedisTemplate;
@@ -35,6 +35,11 @@ public class CacheClient {
 
     public void set(String key, Object value, Long time, TimeUnit unit){
             stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value),time,unit);
+    }
+
+    private void setWithRandomTtl(String key, Object value, Long time, TimeUnit unit){
+        long ttlSeconds = unit.toSeconds(time) + ThreadLocalRandom.current().nextLong(60, 301);
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), ttlSeconds, TimeUnit.SECONDS);
     }
 
     public void setWithLogicalExpire(String key, Object value, Long time, TimeUnit unit){
@@ -69,17 +74,59 @@ public class CacheClient {
         //5.数据库也不存在，返回错误
         if (r  == null) {
             //将空值写入redis
-            stringRedisTemplate.opsForValue().set(key,"",2L,TimeUnit.MINUTES);
+            stringRedisTemplate.opsForValue().set(key,"",CACHE_NULL_TTL,TimeUnit.MINUTES);
             return null;
         }
         //6.存在，写入redis
-        this.set(key,r,time,unit);
+        this.setWithRandomTtl(key,r,time,unit);
         //7.返回
         return r;
     }
 
-    //创建一个线程池 大小为10
-    private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+    public <R, ID> R queryWithMutex(String keyPrefix, ID id, Class<R> type, Function<ID, R> dbFallback,
+                                    Long time, TimeUnit unit) {
+        String key = keyPrefix + id;
+        String json = stringRedisTemplate.opsForValue().get(key);
+        if (StrUtil.isNotBlank(json)) {
+            return JSONUtil.toBean(json, type);
+        }
+        if (json != null) {
+            return null;
+        }
+
+        String lockKey = LOCK_CACHE_KEY + key;
+        boolean locked = false;
+        try {
+            while (!locked) {
+                locked = tryLock(lockKey);
+                if (!locked) {
+                    Thread.sleep(50);
+                }
+            }
+            json = stringRedisTemplate.opsForValue().get(key);
+            if (StrUtil.isNotBlank(json)) {
+                return JSONUtil.toBean(json, type);
+            }
+            if (json != null) {
+                return null;
+            }
+
+            R value = dbFallback.apply(id);
+            if (value == null) {
+                stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                return null;
+            }
+            setWithRandomTtl(key, value, time, unit);
+            return value;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("缓存重建被中断", e);
+        } finally {
+            if (locked) {
+                unlock(lockKey);
+            }
+        }
+    }
 
     //缓存击穿的解决方案  : 用逻辑过期
     public <R,ID> R queryWithLogicalExpire(String keyPrefix, ID id,Class<R> type,Function<ID,R> dbFallBack
@@ -106,7 +153,7 @@ public class CacheClient {
         //5.2已过期 需要缓存重建
         //6.缓存重建
         //6.1 获取互斥锁
-        String localKey = LOCK_SHOP_KEY + id;
+        String localKey = LOCK_CACHE_KEY + key;
         boolean isLock = tryLock(localKey);
         //6.2 判断是否获取锁成功
         if (isLock) {
@@ -115,7 +162,7 @@ public class CacheClient {
                 try {
                     //  Double Check（再查一次Redis）
                     String jsonNew = stringRedisTemplate.opsForValue().get(key);
-                    RedisData redisDataNew = JSONUtil.toBean(json, RedisData.class);
+                    RedisData redisDataNew = JSONUtil.toBean(jsonNew, RedisData.class);
                     LocalDateTime expireTimeNew = redisDataNew.getExpireTime();
                     if (expireTimeNew.isAfter(LocalDateTime.now())) {
                         // 缓存已经被其他线程更新了，不需要重建

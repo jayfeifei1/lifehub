@@ -12,6 +12,7 @@ import com.hmdp.entity.User;
 import com.hmdp.mapper.UserMapper;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.RegexUtils;
+import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
@@ -46,6 +47,8 @@ import static com.hmdp.utils.SystemConstants.USER_NICK_NAME_PREFIX;
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IUserService {
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private CacheClient cacheClient;
     @Override
     public Result sendCode(String phone, HttpSession session) {
         //1.校验手机号
@@ -78,6 +81,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             //3.不一致则报错返回
             return Result.fail("验证码错误");
         }
+        stringRedisTemplate.delete(LOGIN_CODE_KEY + phone);
 
         //4.一致则根据手机号查询用户
         User user = query().eq("phone", phone).one();//相当于select * from tb_user where phone = phone;
@@ -103,9 +107,28 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         stringRedisTemplate.opsForHash().putAll(LOGIN_USER_KEY+token,userMap);
         //设置有效期
         stringRedisTemplate.expire(LOGIN_USER_KEY+token,30,TimeUnit.MINUTES);
-        //返回token
+        UserHolder.saveUser(userDTO);
 
         return Result.ok(token);
+    }
+
+    @Override
+    public Result logout(String token) {
+        if (token == null || token.trim().isEmpty()) {
+            return Result.fail("登录令牌不能为空");
+        }
+        stringRedisTemplate.delete(LOGIN_USER_KEY + token);
+        UserHolder.removeUser();
+        return Result.ok();
+    }
+
+    @Override
+    public UserDTO queryUserByIdWithCache(Long userId) {
+        return cacheClient.queryWithMutex(CACHE_USER_KEY, userId, UserDTO.class,
+                id -> {
+                    User user = getById(id);
+                    return user == null ? null : BeanUtil.copyProperties(user, UserDTO.class);
+                }, CACHE_USER_TTL, TimeUnit.MINUTES);
     }
 
     @Override

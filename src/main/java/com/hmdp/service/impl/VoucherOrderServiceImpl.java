@@ -12,9 +12,11 @@ import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
-import org.springframework.aop.framework.AopContext;
+import org.springframework.context.annotation.Lazy;
+import org.springframework.dao.DataAccessException;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.connection.stream.*;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
@@ -23,22 +25,12 @@ import org.springframework.transaction.annotation.Transactional;
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-
-/**
- * <p>
- *  服务实现类
- * </p>
- *
- * @author 虎哥
- * @since 2021-12-22
- */
 @Slf4j
 @Service
 public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, VoucherOrder> implements IVoucherOrderService {
@@ -50,6 +42,13 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private StringRedisTemplate stringRedisTemplate;
     @Resource
     private RedissonClient redissonClient;
+    @Resource
+    @Lazy
+    private IVoucherOrderService proxy;
+
+    private static final String STREAM_ORDERS = "stream.orders";
+    private static final String STREAM_GROUP = "g1";
+    private static final String STREAM_CONSUMER = "c1";
 
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
     static {
@@ -63,17 +62,31 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @PostConstruct
     private void init(){
+        createStreamGroup();
         SECKILL_ORDER_EXECUTOR.submit(new VoucherOrderHandler());
     }
+
+    private void createStreamGroup() {
+        try {
+            stringRedisTemplate.execute((RedisCallback<String>) connection -> connection.xGroupCreate(
+                    STREAM_ORDERS.getBytes(StandardCharsets.UTF_8), STREAM_GROUP, ReadOffset.from("0"), true));
+        } catch (DataAccessException e) {
+            String message = e.getMessage();
+            if (message == null || !message.contains("BUSYGROUP")) {
+                throw e;
+            }
+        }
+    }
+
     private class VoucherOrderHandler implements Runnable{
-        String queueName = "stream.orders";
+        String queueName = STREAM_ORDERS;
         @Override
         public void run() {
             while(true){
                 try{
                    //1.获取消息队列中的订单信息
                     List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
-                            Consumer.from("g1", "c1"),
+                            Consumer.from(STREAM_GROUP, STREAM_CONSUMER),
                             StreamReadOptions.empty().count(1).block(Duration.ofSeconds(2)),
                             StreamOffset.create(queueName, ReadOffset.lastConsumed())
                     );
@@ -88,9 +101,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     Map<Object, Object> values = record.getValue();
                     VoucherOrder voucherOrder = BeanUtil.fillBeanWithMap(values, new VoucherOrder(), true);
                     //3.如果获取成功，可以下单
-                    handleVoucherOrder(voucherOrder);
-                    //4.ACK确认
-                    stringRedisTemplate.opsForStream().acknowledge(queueName,"g1",record.getId());
+                    if (!handleVoucherOrder(voucherOrder)) {
+                        throw new IllegalStateException("订单处理失败");
+                    }
+                    stringRedisTemplate.opsForStream().acknowledge(queueName, STREAM_GROUP, record.getId());
                 }catch (Exception e){
                     log.error("处理订单异常",e);
                     handlePendingList();
@@ -103,7 +117,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 try{
                     //1.获取pending-list中的订单信息
                     List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
-                            Consumer.from("g1", "c1"),
+                            Consumer.from(STREAM_GROUP, STREAM_CONSUMER),
                             StreamReadOptions.empty().count(1),
                             StreamOffset.create(queueName, ReadOffset.from("0"))
                     );
@@ -118,9 +132,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     Map<Object, Object> values = record.getValue();
                     VoucherOrder voucherOrder = BeanUtil.fillBeanWithMap(values, new VoucherOrder(), true);
                     //3.如果获取成功，可以下单
-                    handleVoucherOrder(voucherOrder);
-                    //4.ACK确认
-                    stringRedisTemplate.opsForStream().acknowledge(queueName,"g1",record.getId());
+                    if (!handleVoucherOrder(voucherOrder)) {
+                        throw new IllegalStateException("订单处理失败");
+                    }
+                    stringRedisTemplate.opsForStream().acknowledge(queueName, STREAM_GROUP, record.getId());
                 }catch (Exception e){
                     log.error("处理pending-list订单异常",e);
                     try {
@@ -133,29 +148,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         }
     }
 
-//    private BlockingQueue<VoucherOrder> orderTasks = new ArrayBlockingQueue<>(1024*1024);
-//    @PostConstruct
-//    private void init(){
-//        SECKILL_ORDER_EXECUTOR.submit(new VoucherOrderHandler());
-//    }
-//    private class VoucherOrderHandler implements Runnable{
-//
-//        @Override
-//        public void run() {
-//            while(true){
-//                try{
-//                    //1.获取队列中的订单信息
-//                    VoucherOrder voucherOrder = orderTasks.take();
-//                    //2.创建订单
-//                    handleVoucherOrder(voucherOrder);
-//                }catch (Exception e){
-//                    log.error("处理订单异常",e);
-//                }
-//            }
-//        }
-//    }
 
-    private void handleVoucherOrder(VoucherOrder voucherOrder) {
+
+    private boolean handleVoucherOrder(VoucherOrder voucherOrder) {
         //获取用户
         Long userId = voucherOrder.getUserId();
         // 创建锁对象
@@ -166,17 +161,16 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         if(!isLock){
             //获取锁失败 ,返回失败
             log.error("不允许重复下单");
-            return;
+            return false;
         }
         try {
 
-            proxy.createVoucherOrder(voucherOrder);
+            return proxy.createVoucherOrder(voucherOrder);
         } finally {
             //释放锁
             lock.unlock();
         }
     }
-    IVoucherOrderService proxy;
 
     @Override
     public Result seckillVoucher(Long voucherId) {
@@ -200,91 +194,15 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail(r == 1?"库存不足":"不能重复下单");
         }
 
-        //获取代理对象（事务）
-        proxy = (IVoucherOrderService) AopContext.currentProxy();
-        //返回订单id
-        return Result.ok(0);
+        return Result.ok(orderId);
     }
 
-//    @Override
-//    public Result seckillVoucher(Long voucherId) {
-//        //获取用户
-//        Long userId = UserHolder.getUser().getId();
-//        //1.执行lua脚本
-//        Long result = stringRedisTemplate.execute(
-//                SECKILL_SCRIPT,
-//                Collections.emptyList(),
-//                voucherId.toString(),
-//                userId.toString()
-//        );
-//
-//        //2.判断结果是否为0
-//        int r = result.intValue();
-//        //2.1 不为0  代表没有购买资格
-//        if (r!=0) {
-//            //2.1 不为0 代表没有购买资格
-//            return Result.fail(r == 1?"库存不足":"不能重复下单");
-//        }
-//        //2.2 为0 则有购买资格 把下单信息保存到阻塞队列
-//
-//        // TODO 保存阻塞队列
-//
-//        VoucherOrder voucherOrder = new VoucherOrder();
-//
-//        long orderId = redisIdWorker.nextId("order");
-//        voucherOrder.setId(orderId);
-//        voucherOrder.setUserId(userId);
-//        voucherOrder.setVoucherId(voucherId);
-//
-//        // 放入阻塞队列
-//        orderTasks.add(voucherOrder);
-//        //获取代理对象（事务）
-//        proxy = (IVoucherOrderService) AopContext.currentProxy();
-//        //返回订单id
-//        return Result.ok(0);
-//    }
 
-//    @Override
-//    public Result seckillVoucher(Long voucherId) {
-//        //1.查询优惠券
-//        SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
-//        //2.判断秒杀是否开始
-//        if (voucher.getBeginTime().isAfter(LocalDateTime.now())) {
-//            return Result.fail("秒杀尚未开始！");
-//        }
-//        //3.判断秒杀是否结束
-//        if (voucher.getEndTime().isBefore(LocalDateTime.now())) {
-//            return Result.fail("秒杀已经结束！");
-//        }
-//        //4.判断库存是否充足
-//        if (voucher.getStock() < 1) {
-//            return Result.fail("库存不足！");
-//        }
-//        Long userId = UserHolder.getUser().getId();
-//        // 创建锁对象
-////        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
-//        RLock lock = redissonClient.getLock("lock:order:" + userId);
-//        //获取锁
-//        boolean isLock = lock.tryLock();
-//        //判断是否获取锁成功
-//        if(!isLock){
-//            //获取锁失败 ,返回失败
-//            return Result.fail("一个人只允许下一单！");
-//        }
-//        try {
-//            //获取代理对象（事务）
-//            IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
-//            return proxy.createVoucherOrder(voucherId);
-//        } finally {
-//            //释放锁
-//            lock.unlock();
-//        }
-//    }
 
 
 
     @Transactional
-    public void createVoucherOrder(VoucherOrder voucherOrder) {
+    public boolean createVoucherOrder(VoucherOrder voucherOrder) {
         //一人一单
         Long userId = voucherOrder.getUserId();
         //查询订单
@@ -292,7 +210,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         //判断是否存在
         if (count>0) {
             log.error("用户已经购买了一次");
-            return;
+            return true;
         }
 
         //5.扣减库存
@@ -302,10 +220,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         if(!success){
             //扣减失败
             log.error("库存不足");
-            return;
+            return false;
         }
 
-        save(voucherOrder);
+        return save(voucherOrder);
 
     }
 }

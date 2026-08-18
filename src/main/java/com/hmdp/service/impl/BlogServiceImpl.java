@@ -3,6 +3,7 @@ package com.hmdp.service.impl;
 import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.hmdp.dto.Result;
 import com.hmdp.dto.ScrollResult;
@@ -27,9 +28,9 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.concurrent.TimeUnit;
 
-import static com.hmdp.utils.RedisConstants.BLOG_LIKED_KEY;
-import static com.hmdp.utils.RedisConstants.FEED_KEY;
+import static com.hmdp.utils.RedisConstants.*;
 
 /**
  * <p>
@@ -56,10 +57,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             return Result.fail("笔记不存在");
         }
         //2.查询blog有关的用户
-        Long userId = blog.getUserId();
-        User user = userService.getById(userId);
-        blog.setName(user.getNickName());
-        blog.setIcon(user.getIcon());
+        fillBlogUser(blog);
         //3.查询blog是否被点赞
         isBlogLiked(blog);
         return Result.ok(blog);
@@ -68,18 +66,23 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
 
     @Override
     public Result queryHotBlog(Integer current) {
-        // 根据用户查询
-        Page<Blog> page = query()
-                .orderByDesc("liked")
-                .page(new Page<>(current, SystemConstants.MAX_PAGE_SIZE));
-        // 获取当前页数据
-        List<Blog> records = page.getRecords();
+        String cacheKey = CACHE_BLOG_HOT_KEY + current;
+        String cached = stringRedisTemplate.opsForValue().get(cacheKey);
+        List<Blog> records;
+        if (StrUtil.isNotBlank(cached)) {
+            records = JSONUtil.toList(cached, Blog.class);
+        } else {
+            Page<Blog> page = query()
+                    .orderByDesc("liked")
+                    .page(new Page<>(current, SystemConstants.MAX_PAGE_SIZE));
+            records = page.getRecords();
+            stringRedisTemplate.opsForValue().set(
+                    cacheKey, JSONUtil.toJsonStr(records), CACHE_BLOG_HOT_TTL, TimeUnit.MINUTES);
+        }
+
         // 查询用户
         records.forEach(blog ->{
-            Long userId = blog.getUserId();
-            User user = userService.getById(userId);
-            blog.setName(user.getNickName());
-            blog.setIcon(user.getIcon());
+            fillBlogUser(blog);
             isBlogLiked(blog);
         });
 
@@ -131,6 +134,8 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             }
         }
 
+        clearHotBlogCache();
+
         return Result.ok();
     }
 
@@ -176,6 +181,8 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             stringRedisTemplate.opsForZSet().add(key,blog.getId().toString(),System.currentTimeMillis());
         }
 
+        clearHotBlogCache();
+
         //3.返回
         return Result.ok(blog.getId());
     }
@@ -214,10 +221,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         List<Blog> blogs = query().in("id", ids).last("ORDER BY FIELD(id," + idStr + ")").list();
         for (Blog blog : blogs) {
             //5.1.查询blog有关的用户
-            Long userId1 = blog.getUserId();
-            User user = userService.getById(userId1);
-            blog.setName(user.getNickName());
-            blog.setIcon(user.getIcon());
+            fillBlogUser(blog);
             //5.2.查询blog是否被点赞
             isBlogLiked(blog);
         }
@@ -227,5 +231,26 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         r.setOffset(offset1);
         r.setMinTime(minTime);
         return Result.ok(r);
+    }
+
+    private void clearHotBlogCache() {
+        Set<String> keys = stringRedisTemplate.keys(CACHE_BLOG_HOT_KEY + "*");
+        if (keys != null && !keys.isEmpty()) {
+            stringRedisTemplate.delete(keys);
+        }
+    }
+
+    private void fillBlogUser(Blog blog) {
+        if (blog == null || blog.getUserId() == null) {
+            return;
+        }
+        User user = userService.getById(blog.getUserId());
+        if (user == null) {
+            blog.setName("unknown");
+            blog.setIcon("");
+            return;
+        }
+        blog.setName(user.getNickName());
+        blog.setIcon(user.getIcon());
     }
 }
