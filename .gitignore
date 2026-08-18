@@ -31,3 +31,11 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Local development artifacts ###
+.codex
+.codex/
+.history/
+tokens.csv
+nginx-1.18.0/
+frontend/

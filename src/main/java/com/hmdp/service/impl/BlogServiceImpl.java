@@ -10,7 +10,6 @@ import com.hmdp.dto.ScrollResult;
 import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.Blog;
 import com.hmdp.entity.Follow;
-import com.hmdp.entity.User;
 import com.hmdp.mapper.BlogMapper;
 import com.hmdp.service.IBlogService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -244,7 +243,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         if (blog == null || blog.getUserId() == null) {
             return;
         }
-        User user = userService.getById(blog.getUserId());
+        UserDTO user = userService.queryUserByIdWithCache(blog.getUserId());
         if (user == null) {
             blog.setName("unknown");
             blog.setIcon("");
