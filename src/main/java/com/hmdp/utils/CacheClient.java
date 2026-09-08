@@ -1,14 +1,17 @@
 package com.hmdp.utils;
 
-import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
+import java.util.Collections;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -28,6 +31,13 @@ import static com.hmdp.utils.RedisConstants.*;
 public class CacheClient {
     private final StringRedisTemplate stringRedisTemplate;
     private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+    private static final DefaultRedisScript<Long> UNLOCK_SCRIPT;
+
+    static {
+        UNLOCK_SCRIPT = new DefaultRedisScript<>();
+        UNLOCK_SCRIPT.setLocation(new ClassPathResource("unlock.lua"));
+        UNLOCK_SCRIPT.setResultType(Long.class);
+    }
 
     public CacheClient(StringRedisTemplate stringRedisTemplate) {
         this.stringRedisTemplate = stringRedisTemplate;
@@ -95,10 +105,11 @@ public class CacheClient {
         }
 
         String lockKey = LOCK_CACHE_KEY + key;
+        String lockValue = UUID.randomUUID().toString();
         boolean locked = false;
         try {
             while (!locked) {
-                locked = tryLock(lockKey);
+                locked = tryLock(lockKey, lockValue);
                 if (!locked) {
                     Thread.sleep(50);
                 }
@@ -123,7 +134,7 @@ public class CacheClient {
             throw new IllegalStateException("缓存重建被中断", e);
         } finally {
             if (locked) {
-                unlock(lockKey);
+                unlock(lockKey, lockValue);
             }
         }
     }
@@ -154,7 +165,8 @@ public class CacheClient {
         //6.缓存重建
         //6.1 获取互斥锁
         String localKey = LOCK_CACHE_KEY + key;
-        boolean isLock = tryLock(localKey);
+        String lockValue = UUID.randomUUID().toString();
+        boolean isLock = tryLock(localKey, lockValue);
         //6.2 判断是否获取锁成功
         if (isLock) {
             //6.3 成功 ， 开启独立线程实现缓存重建
@@ -177,7 +189,7 @@ public class CacheClient {
                     throw new RuntimeException(e);
                 }finally {
                     //释放锁
-                    unlock(localKey);
+                    unlock(localKey, lockValue);
                 }
             });
         }
@@ -186,14 +198,14 @@ public class CacheClient {
     }
 
     //获取锁的方法
-    private boolean tryLock(String key){
-        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", 10, TimeUnit.SECONDS);
-        //flag != null && flag == true 的时候才返回 true
-        return BooleanUtil.isTrue(flag);
+    private boolean tryLock(String key, String value){
+        Boolean success = stringRedisTemplate.opsForValue()
+                .setIfAbsent(key, value, LOCK_CACHE_TTL, TimeUnit.SECONDS);
+        return Boolean.TRUE.equals(success);
     }
-    //释放锁的方法
-    private void unlock(String key){
-        stringRedisTemplate.delete(key);
+
+    private void unlock(String key, String value){
+        stringRedisTemplate.execute(UNLOCK_SCRIPT, Collections.singletonList(key), value);
     }
 
 }

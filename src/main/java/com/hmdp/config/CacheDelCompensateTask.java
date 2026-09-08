@@ -6,6 +6,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.Resource;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static com.hmdp.utils.RedisConstants.*;
@@ -37,6 +39,7 @@ public class CacheDelCompensateTask {
     @Scheduled(fixedDelay = 5_000)
     public void compensate() {
         int processed = 0;
+        List<String> retryKeys = new ArrayList<>();
         while (true) {
             //1.从队列尾部取一个待删 key（LPUSH/RPOP = FIFO）
             String cacheKey = stringRedisTemplate.opsForList().rightPop(CACHE_DEL_QUEUE_KEY);
@@ -61,10 +64,17 @@ public class CacheDelCompensateTask {
                             CACHE_DEL_MAX_RETRY, cacheKey);
                     stringRedisTemplate.delete(CACHE_DEL_RETRY_KEY + cacheKey);
                 } else {
-                    //6.未超限：重新入队，下一轮再试
-                    stringRedisTemplate.opsForList().leftPush(CACHE_DEL_QUEUE_KEY, cacheKey);
-                    log.warn("补偿删除缓存失败，第{}次重试等待: {}", retries, cacheKey);
+                    //6.未超限：本轮结束后再重新入队，下一次定时任务再试，避免同一轮立即耗尽重试次数
+                    retryKeys.add(cacheKey);
+                    log.warn("补偿删除缓存失败，第{}次重试将在下一轮执行: {}", retries, cacheKey);
                 }
+            }
+        }
+        for (String cacheKey : retryKeys) {
+            try {
+                stringRedisTemplate.opsForList().leftPush(CACHE_DEL_QUEUE_KEY, cacheKey);
+            } catch (Exception e) {
+                log.error("补偿缓存重新入队失败，依赖缓存 TTL 兜底: {}", cacheKey, e);
             }
         }
         if (processed > 0) {

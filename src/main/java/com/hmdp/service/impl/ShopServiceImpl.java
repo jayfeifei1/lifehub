@@ -23,6 +23,8 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.domain.geo.GeoReference;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import javax.annotation.Resource;
 import java.time.LocalDateTime;
@@ -276,27 +278,38 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         //1.先更新数据库（Cache Aside 标准顺序：先更新 DB，再删缓存）
         updateById(shop);
 
-        //2.删除缓存（消息队列补偿方案：删除失败不阻断业务，key 入补偿队列由 CacheDelCompensateTask
-        //   异步重试删除，DB 正常提交，缓存最终一致；生产上可替换为 MQ 投递）
-        try {
-            stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
-        } catch (Exception e) {
-            log.error("删除缓存失败，进入补偿队列: {}", CACHE_SHOP_KEY + id, e);
-            stringRedisTemplate.opsForList().leftPush(CACHE_DEL_QUEUE_KEY, CACHE_SHOP_KEY + id);
-        }
-
-        //3.同步更新 GEO 坐标（店铺位置可能变更）
+        //2.同步更新 GEO 坐标（店铺位置可能变更）
         if (shop.getTypeId() != null && shop.getX() != null && shop.getY() != null) {
             String geoKey = SHOP_GEO_KEY + shop.getTypeId();
             stringRedisTemplate.opsForGeo().remove(geoKey, id.toString());
             stringRedisTemplate.opsForGeo().add(geoKey, new Point(shop.getX(), shop.getY()), id.toString());
         }
 
-        //4.延迟双删（补偿）：消除"更新 DB 后、删缓存前"窗口内读请求回源旧值写回缓存的极端交错；
-        //   与第 2 步的补偿队列互补（补偿队列管"删除失败"，延迟双删管"删除后并发回填"）
-        CACHE_DELAY_EXECUTOR.schedule(() -> stringRedisTemplate.delete(CACHE_SHOP_KEY + id), 1, TimeUnit.SECONDS);
+        //3.提交成功后再删缓存，避免事务未提交时读请求回源旧值并写回缓存。
+        //  二次删除从提交后开始计时，用于清理极端并发下的旧值回填。
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                deleteShopCache(id);
+                CACHE_DELAY_EXECUTOR.schedule(() -> deleteShopCache(id), 1, TimeUnit.SECONDS);
+            }
+        });
 
         return Result.ok();
+    }
+
+    private void deleteShopCache(Long id) {
+        String cacheKey = CACHE_SHOP_KEY + id;
+        try {
+            stringRedisTemplate.delete(cacheKey);
+        } catch (Exception e) {
+            log.error("删除缓存失败，进入补偿队列: {}", cacheKey, e);
+            try {
+                stringRedisTemplate.opsForList().leftPush(CACHE_DEL_QUEUE_KEY, cacheKey);
+            } catch (Exception queueException) {
+                log.error("缓存删除补偿入队失败，依赖缓存 TTL 兜底: {}", cacheKey, queueException);
+            }
+        }
     }
 
     @Override
