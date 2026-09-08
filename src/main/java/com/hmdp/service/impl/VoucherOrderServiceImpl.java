@@ -11,6 +11,8 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
+
+import static com.hmdp.utils.RedisConstants.*;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.context.annotation.Lazy;
@@ -22,6 +24,8 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
@@ -34,6 +38,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 秒杀订单服务
@@ -291,12 +296,21 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail(r == 1?"库存不足":"不能重复下单");
         }
 
+        //3.受理成功：写入"处理中"状态，供前端轮询查询下单结果（TTL 过期后以 DB 为准）
+        stringRedisTemplate.opsForValue().set(
+                ORDER_STATUS_KEY + orderId, ORDER_STATUS_CREATING, ORDER_STATUS_TTL, TimeUnit.MINUTES);
+
         return Result.ok(orderId);
     }
 
     /**
      * 在 DB 事务中创建订单：一人一单校验 -> 乐观锁扣减库存 -> 插入订单。
      * 任一失败整个事务回滚，不会出现"库存扣了订单没建"的不一致。
+     *
+     * 订单状态（Redis）与订单创建（DB）不放在同一原子操作中：
+     * - SUCCESS 状态在事务【提交成功后】通过 afterCommit 写入，保证"看到成功=订单已在DB"；
+     * - 事务回滚时 afterCommit 不执行，状态停留在 CREATING，由查询接口回源 DB 兜底；
+     * - 状态写失败也不影响主流程（saveOrderStatus 内部捕获），最终以 DB 为真相。
      */
     @Transactional
     public OrderHandleResult createVoucherOrder(VoucherOrder voucherOrder) {
@@ -308,6 +322,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         if (count>0) {
             //已购买：幂等成功（消息可 ACK，但不能重复建单）
             log.warn("用户已购买过一次，幂等返回: userId={}, voucherId={}", userId, voucherOrder.getVoucherId());
+            registerSuccessAfterCommit(voucherOrder.getId());
             return OrderHandleResult.SUCCESS;
         }
 
@@ -318,14 +333,73 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         if(!success){
             //DB 库存不足：永久失败，转死信队列由对账任务回补 Redis 库存
             log.error("扣减DB库存失败(永久性): voucherId={}", voucherOrder.getVoucherId());
+            //本分支事务无任何写入，提交必然成功，直接写失败状态（用户可立即感知，无需等对账）
+            saveOrderStatus(voucherOrder.getId(), ORDER_STATUS_FAILED);
             return OrderHandleResult.FATAL;
         }
 
-        //插入订单
+        //插入订单（订单状态：1=未支付，支付/核销流程后续基于该字段扩展）
+        voucherOrder.setStatus(1);
         if (!save(voucherOrder)) {
             //抛异常触发事务回滚，连同上面的库存扣减一起回滚
             throw new IllegalStateException("订单保存失败");
         }
+        //事务提交成功后才写 SUCCESS 状态
+        registerSuccessAfterCommit(voucherOrder.getId());
         return OrderHandleResult.SUCCESS;
+    }
+
+    /**
+     * 注册事务提交成功后的回调：订单已落库才写 SUCCESS 状态（提交后通知，非同一原子操作）
+     */
+    private void registerSuccessAfterCommit(Long orderId) {
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                saveOrderStatus(orderId, ORDER_STATUS_SUCCESS);
+            }
+        });
+    }
+
+    /**
+     * 写入订单状态到 Redis（String 类型，带 TTL 的通知窗口）
+     */
+    private void saveOrderStatus(Long orderId, String status) {
+        try {
+            stringRedisTemplate.opsForValue().set(
+                    ORDER_STATUS_KEY + orderId, status, ORDER_STATUS_TTL, TimeUnit.MINUTES);
+            log.debug("订单状态已写入Redis: orderId={}, status={}", orderId, status);
+        } catch (Exception e) {
+            //状态写失败不阻塞主流程，查询接口会回源 DB 兜底
+            log.error("写入订单状态失败: orderId={}, status={}", orderId, status, e);
+        }
+    }
+
+    /**
+     * 查询异步下单结果：Redis 状态优先（毫秒级，扛住前端轮询），key 缺失/过期时回源 DB 兜底。
+     * 返回 SUCCESS 时附带完整订单；FAILED 返回失败提示；处理中返回 CREATING 语义。
+     */
+    @Override
+    public Result queryOrderStatus(Long orderId) {
+        //1.先查 Redis 状态（通知窗口内）
+        String status = stringRedisTemplate.opsForValue().get(ORDER_STATUS_KEY + orderId);
+        if (ORDER_STATUS_SUCCESS.equals(status)) {
+            //2.下单成功：返回完整订单
+            VoucherOrder order = getById(orderId);
+            if (order != null) {
+                return Result.ok(order);
+            }
+            //极端情况：状态写了但订单查询不到，落到 DB 兜底逻辑继续
+        } else if (ORDER_STATUS_FAILED.equals(status)) {
+            //3.永久失败：告知用户（库存已由对账任务回补）
+            return Result.fail("订单创建失败，库存已退回");
+        }
+
+        //4.CREATING 或 key 已过期：回源 DB（真相在 DB，状态 key 只是通知窗口）
+        VoucherOrder order = getById(orderId);
+        if (order != null) {
+            return Result.ok(order);
+        }
+        return Result.ok("处理中");
     }
 }

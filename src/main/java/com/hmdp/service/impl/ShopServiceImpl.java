@@ -13,9 +13,11 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisData;
 import com.hmdp.utils.SystemConstants;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.geo.Distance;
 import org.springframework.data.geo.GeoResult;
 import org.springframework.data.geo.GeoResults;
+import org.springframework.data.geo.Point;
 import org.springframework.data.redis.connection.RedisGeoCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.domain.geo.GeoReference;
@@ -28,6 +30,7 @@ import java.util.*;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import static com.hmdp.utils.RedisConstants.*;
@@ -40,6 +43,7 @@ import static com.hmdp.utils.RedisConstants.*;
  * @author 虎哥
  * @since 2021-12-22
  */
+@Slf4j
 @Service
 public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IShopService {
 
@@ -60,6 +64,8 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     }
     //创建一个线程池 大小为10
     private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+    //延迟双删调度线程池
+    private static final ScheduledExecutorService CACHE_DELAY_EXECUTOR = Executors.newSingleThreadScheduledExecutor();
 
     //缓存击穿的解决方案  : 用逻辑过期
 //    public Shop queryWithLogicalExpire(Long id){
@@ -239,6 +245,27 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     }
 
 
+    /**
+     * 新增商铺：写入 DB + 同步写入 Redis GEO（供附近商铺查询使用）
+     */
+    @Override
+    @Transactional
+    public Result addShop(Shop shop) {
+        if (shop.getTypeId() == null) {
+            return Result.fail("店铺类型不能为空");
+        }
+        //1.写入数据库
+        save(shop);
+        //2.同步写入 GEO（shop:geo:{typeId}）
+        if (shop.getX() != null && shop.getY() != null) {
+            stringRedisTemplate.opsForGeo().add(
+                    SHOP_GEO_KEY + shop.getTypeId(),
+                    new Point(shop.getX(), shop.getY()),
+                    shop.getId().toString());
+        }
+        return Result.ok(shop.getId());
+    }
+
     @Override
     @Transactional
     public Result updateShop(Shop shop) {
@@ -246,10 +273,28 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         if (id == null) {
             return Result.fail("店铺id不能为空");
         }
-        //1.更新数据库
+        //1.先更新数据库（Cache Aside 标准顺序：先更新 DB，再删缓存）
         updateById(shop);
-        //2.删除缓存
-        stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
+
+        //2.删除缓存（消息队列补偿方案：删除失败不阻断业务，key 入补偿队列由 CacheDelCompensateTask
+        //   异步重试删除，DB 正常提交，缓存最终一致；生产上可替换为 MQ 投递）
+        try {
+            stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
+        } catch (Exception e) {
+            log.error("删除缓存失败，进入补偿队列: {}", CACHE_SHOP_KEY + id, e);
+            stringRedisTemplate.opsForList().leftPush(CACHE_DEL_QUEUE_KEY, CACHE_SHOP_KEY + id);
+        }
+
+        //3.同步更新 GEO 坐标（店铺位置可能变更）
+        if (shop.getTypeId() != null && shop.getX() != null && shop.getY() != null) {
+            String geoKey = SHOP_GEO_KEY + shop.getTypeId();
+            stringRedisTemplate.opsForGeo().remove(geoKey, id.toString());
+            stringRedisTemplate.opsForGeo().add(geoKey, new Point(shop.getX(), shop.getY()), id.toString());
+        }
+
+        //4.延迟双删（补偿）：消除"更新 DB 后、删缓存前"窗口内读请求回源旧值写回缓存的极端交错；
+        //   与第 2 步的补偿队列互补（补偿队列管"删除失败"，延迟双删管"删除后并发回填"）
+        CACHE_DELAY_EXECUTOR.schedule(() -> stringRedisTemplate.delete(CACHE_SHOP_KEY + id), 1, TimeUnit.SECONDS);
 
         return Result.ok();
     }

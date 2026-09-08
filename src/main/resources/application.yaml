@@ -22,6 +22,10 @@ spring:
     default-property-inclusion: non_null # JSON处理时忽略非空字段
 mybatis-plus:
   type-aliases-package: com.hmdp.entity # 别名扫描包
+# 业务自定义配置
+hmdp:
+  # 图片上传根目录（容器部署通过 UPLOAD_DIR 环境变量覆盖）
+  upload-dir: "${UPLOAD_DIR:D:/BaiduNetdiskDownload/redis/nginx-1.18.0/html/hmdp/imgs}"
 logging:
   level:
     com.hmdp: debug

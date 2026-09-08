@@ -105,8 +105,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
                         .setFieldValueEditor((fieldName,fieldValue) -> fieldValue.toString()));
         //保存数据到redis
         stringRedisTemplate.opsForHash().putAll(LOGIN_USER_KEY+token,userMap);
-        //设置有效期
-        stringRedisTemplate.expire(LOGIN_USER_KEY+token,30,TimeUnit.MINUTES);
+        //设置有效期（与 RefreshTokenInterceptor 滑动续期保持一致：30 分钟）
+        stringRedisTemplate.expire(LOGIN_USER_KEY+token,LOGIN_USER_TTL,TimeUnit.SECONDS);
         UserHolder.saveUser(userDTO);
 
         return Result.ok(token);

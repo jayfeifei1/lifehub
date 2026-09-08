@@ -18,4 +18,9 @@ public interface IVoucherOrderService extends IService<VoucherOrder> {
     Result seckillVoucher(Long voucherId);
 
     OrderHandleResult createVoucherOrder(VoucherOrder voucherOrder);
+
+    /**
+     * 查询异步下单结果：Redis 状态优先，缺失/过期时回源 DB 兜底
+     */
+    Result queryOrderStatus(Long orderId);
 }

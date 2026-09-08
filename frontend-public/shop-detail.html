@@ -219,13 +219,32 @@
           return;
         }
         let id = v.id;
-        // 秒杀抢购
+        // 秒杀抢购（返回的是受理结果，实际下单是异步的）
         axios.post("/voucher-order/seckill/" + id)
         .then(({data}) => {
-          // 抢购成功，这里输出订单id，支付功能TODO
-          this.$message.success("抢购成功，订单id：" + data)
+          // 轮询下单结果，最多 60 秒
+          this.pollOrderStatus(data, 0);
         })
         .catch(this.$message.error)
+      },
+      pollOrderStatus(orderId, count) {
+        axios.get("/voucher-order/status/" + orderId)
+        .then(({data}) => {
+          if (data && data.id) {
+            // 下单成功（返回完整订单）
+            this.$message.success("抢购成功，订单id：" + data.id);
+          } else if (count >= 30) {
+            // 超过 60 秒仍处理中，提示稍后查看
+            this.$message.error("订单处理中，请稍后刷新查看");
+          } else {
+            // 仍在创建中，2 秒后继续轮询
+            setTimeout(() => this.pollOrderStatus(orderId, count + 1), 2000);
+          }
+        })
+        .catch(err => {
+          // 下单失败（后端返回失败原因，如"订单创建失败，库存已退回"）
+          this.$message.error(err);
+        })
       }
     }
   })

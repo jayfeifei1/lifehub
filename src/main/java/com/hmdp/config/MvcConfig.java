@@ -26,10 +26,10 @@ public class MvcConfig implements WebMvcConfigurer {
         //第二个拦截器 下方的是放行的路径 其他都拦截
         registry.addInterceptor(new LoginInterceptor())
                 .excludePathPatterns(
-                        "/voucher/**",
+                        // 店铺/类型/热点博客/登录 等浏览类接口放行
+                        "/voucher/list/**",
                         "/shop/**",
                         "/shop-type/**",
-                        "/upload/**",
                         "/blog/hot",
                         "/user/code",
                         "/user/login"

@@ -52,6 +52,10 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: 123456
+      # 图片上传目录：与前端共享同一静态目录（backend 可写，frontend 只读）
+      UPLOAD_DIR: /usr/share/nginx/html/imgs
+    volumes:
+      - ./frontend-public:/usr/share/nginx/html
     depends_on:
       mysql:
         condition: service_healthy

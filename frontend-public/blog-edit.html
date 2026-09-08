@@ -1,10 +1,10 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
-  <title>黑马点评</title>
-  <!-- 引入样式 -->
+  <title>榛戦┈鐐硅瘎</title>
+  <!-- 寮曞叆鏍峰紡 -->
   <link rel="stylesheet" href="./css/element.css">
   <link href="./css/main.css" rel="stylesheet">
   <link href="./css/blog-edit.css" rel="stylesheet">
@@ -16,17 +16,17 @@
 <body>
 <div id="app">
   <div class="header">
-    <div class="header-cancel-btn" @click="goBack">取消</div>
-    <div class="header-title">&nbsp;&nbsp;发笔记<i class="el-icon-info"></i></div>
+    <div class="header-cancel-btn" @click="goBack">鍙栨秷</div>
+    <div class="header-title">&nbsp;&nbsp;鍙戠瑪璁?i class="el-icon-info"></i></div>
     <div class="header-commit">
-      <div class="header-commit-btn" @click="submitBlog">发布</div>
+      <div class="header-commit-btn" @click="submitBlog">鍙戝竷</div>
     </div>
   </div>
   <div class="upload-box">
     <input type="file" @change="fileSelected" name="file" ref="fileInput" style="display: none">
     <div class="upload-btn" @click="openFileDialog">
       <i class="el-icon-camera"></i>
-      <div style="font-size: 12px;line-height: 12px">上传照片</div>
+      <div style="font-size: 12px;line-height: 12px">涓婁紶鐓х墖</div>
     </div>
     <div class="pic-list">
       <div class="pic-box" v-for="(f,i) in fileList" :key="i">
@@ -36,29 +36,29 @@
     </div>
   </div>
   <div class="blog-title">
-    <input v-model="params.title" type="text" placeholder="填写标题更容易上首页哦~">
+    <input v-model="params.title" type="text" placeholder="濉啓鏍囬鏇村鏄撲笂棣栭〉鍝">
   </div>
   <div class="blog-content">
-    <textarea v-model="params.content" placeholder="最近打卡了什么地方，有什么新奇体验呢？"></textarea>
+    <textarea v-model="params.content" placeholder="鏈€杩戞墦鍗′簡浠€涔堝湴鏂癸紝鏈変粈涔堟柊濂囦綋楠屽憿锛?></textarea>
   </div>
   <div class="divider"></div>
   <div class="blog-shop" @click="showDialog=true">
-    <div class="shop-left">关联商户</div>
+    <div class="shop-left">鍏宠仈鍟嗘埛</div>
     <div v-if="selectedShop.name">{{selectedShop.name}}</div>
-    <div v-else>去选择&nbsp;<i class="el-icon-arrow-right"></i></div>
+    <div v-else>鍘婚€夋嫨&nbsp;<i class="el-icon-arrow-right"></i></div>
   </div>
   <div class="mask" v-show="showDialog" @click="showDialog=false"></div>
 
   <transition name="el-zoom-in-bottom">
     <div class="shop-dialog" v-show="showDialog">
       <div class="blog-shop">
-        <div class="shop-left">关联商户</div>
+        <div class="shop-left">鍏宠仈鍟嗘埛</div>
       </div>
       <div class="search-bar">
-        <div class="city-select">杭州 <i class="el-icon-arrow-down"></i></div>
+        <div class="city-select">鏉窞 <i class="el-icon-arrow-down"></i></div>
         <div class="search-input">
           <i class="el-icon-search" @click="queryShops"></i>
-          <input v-model="shopName" type="text" placeholder="搜索商户名称">
+          <input v-model="shopName" type="text" placeholder="鎼滅储鍟嗘埛鍚嶇О">
         </div>
       </div>
       <div class="shop-list">
@@ -72,7 +72,7 @@
 </div>
 <script src="./js/vue.js"></script>
 <script src="./js/axios.min.js"></script>
-<!-- 引入组件库 -->
+<!-- 寮曞叆缁勪欢搴?-->
 <script src="./js/element.js"></script>
 <script src="./js/common.js"></script>
 <script src="./js/footer.js"></script>
@@ -83,12 +83,12 @@
     data() {
       return {
         util,
-        fileList: [], // 文件列表
+        fileList: [], // 鏂囦欢鍒楄〃
         params: {},
         showDialog: false, //
-        shops: [], // 商户信息
-        shopName: "", //商户名称
-        selectedShop: {}, // 选中的商户
+        shops: [], // 鍟嗘埛淇℃伅
+        shopName: "", //鍟嗘埛鍚嶇О
+        selectedShop: {}, // 閫変腑鐨勫晢鎴?
       }
     },
     created() {
@@ -129,17 +129,17 @@
           .catch(this.$message.error);
       },
       deletePic(i) {
-        axios.get("/upload/blog/delete?name=" + this.fileList[i])
+        axios.post("/upload/blog/delete", null, {params: {name: this.fileList[i]}})
           .then(() => this.fileList.splice(i, 1))
           .catch(this.$message.error)
       },
       checkLogin() {
-        // 获取token
+        // 鑾峰彇token
         let token = sessionStorage.getItem("token");
         if (!token) {
           location.href = "login.html"
         }
-        // 查询用户信息
+        // 鏌ヨ鐢ㄦ埛淇℃伅
         axios.get("/user/me")
           .then()
           .catch(err => {
