@@ -5,6 +5,7 @@ import com.hmdp.dto.OrderHandleResult;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.VoucherOrder;
 import com.hmdp.mapper.VoucherOrderMapper;
+import com.hmdp.mq.RocketMqBusinessProducer;
 import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -16,6 +17,7 @@ import static com.hmdp.utils.RedisConstants.*;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.connection.stream.*;
@@ -66,6 +68,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     @Lazy
     private IVoucherOrderService proxy;
+    @Resource
+    private RocketMqBusinessProducer rocketMqBusinessProducer;
+    @Value("${hmdp.seckill.queue-mode:rocketmq}")
+    private String queueMode;
 
     private static final String STREAM_ORDERS = "stream.orders";
     private static final String STREAM_GROUP = "g1";
@@ -89,6 +95,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @PostConstruct
     private void init(){
+        if ("rocketmq".equalsIgnoreCase(queueMode)) {
+            log.info("秒杀队列模式: RocketMQ，跳过Redis Stream消费者启动");
+            return;
+        }
         createStreamGroup();
         SECKILL_ORDER_EXECUTOR.submit(new VoucherOrderHandler());
     }
@@ -249,7 +259,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     /**
      * 执行下单：加 Redisson 锁串行化同一用户的订单，区分可重试/永久失败
      */
-    private OrderHandleResult handleVoucherOrder(VoucherOrder voucherOrder) {
+    @Override
+    public OrderHandleResult handleVoucherOrder(VoucherOrder voucherOrder) {
         //获取用户
         Long userId = voucherOrder.getUserId();
         // 创建锁对象
@@ -280,6 +291,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         Long userId = UserHolder.getUser().getId();
         //获取订单id
         long orderId = redisIdWorker.nextId("order");
+        if ("rocketmq".equalsIgnoreCase(queueMode)) {
+            return rocketMqBusinessProducer.sendSeckillOrder(voucherId, userId, orderId);
+        }
         //1.执行lua脚本
         Long result = stringRedisTemplate.execute(
                 SECKILL_SCRIPT,

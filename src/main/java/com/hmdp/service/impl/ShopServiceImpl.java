@@ -8,6 +8,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
+import com.hmdp.mq.RocketMqBusinessProducer;
 import com.hmdp.service.IShopService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.CacheClient;
@@ -15,6 +16,7 @@ import com.hmdp.utils.RedisData;
 import com.hmdp.utils.SystemConstants;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.geo.Distance;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.geo.GeoResult;
 import org.springframework.data.geo.GeoResults;
 import org.springframework.data.geo.Point;
@@ -53,6 +55,10 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     private StringRedisTemplate stringRedisTemplate;
     @Resource
     private CacheClient cacheClient;
+    @Resource
+    private RocketMqBusinessProducer rocketMqBusinessProducer;
+    @Value("${hmdp.cache.invalidation-mode:rocketmq}")
+    private String cacheInvalidationMode;
 
     @Override
     public Result queryById(Long id) {
@@ -274,6 +280,9 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         Long id = shop.getId();
         if (id == null) {
             return Result.fail("店铺id不能为空");
+        }
+        if ("rocketmq".equalsIgnoreCase(cacheInvalidationMode)) {
+            return rocketMqBusinessProducer.sendShopUpdate(shop);
         }
         //1.先更新数据库（Cache Aside 标准顺序：先更新 DB，再删缓存）
         updateById(shop);

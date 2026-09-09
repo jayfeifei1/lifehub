@@ -4,6 +4,7 @@ import com.hmdp.entity.VoucherOrder;
 import com.hmdp.service.IVoucherOrderService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.domain.Range;
 import org.springframework.data.redis.connection.stream.MapRecord;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -29,6 +30,7 @@ import static com.hmdp.service.impl.VoucherOrderServiceImpl.STREAM_ORDERS_DLQ;
  */
 @Slf4j
 @Component
+@ConditionalOnProperty(name = "hmdp.seckill.queue-mode", havingValue = "redis-stream")
 public class SeckillOrderReconcileTask {
 
     private static final DefaultRedisScript<Long> RESTORE_SCRIPT;

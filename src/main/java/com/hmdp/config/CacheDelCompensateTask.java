@@ -2,6 +2,7 @@ package com.hmdp.config;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -19,7 +20,7 @@ import static com.hmdp.utils.RedisConstants.*;
  * 旧缓存会残留导致不一致。生产级做法是把待删 key 投递到消息队列，后台消费者
  * 持续重试删除，直到成功。
  *
- * 本项目未引入 MQ，使用 Redis List 作为轻量队列（cache:del:queue）模拟 MQ 语义：
+ * Redis List 模式使用 cache:del:queue 模拟 MQ 语义：
  * - 写入方（ShopServiceImpl.updateShop）：删除失败 → key 入队（LPUSH）
  * - 消费方（本任务）：定时出队（RPOP）重试删除，成功即完成；
  *   失败则重试计数 +1，未超限重新入队（下次再试），超限丢弃并告警（由缓存 TTL 最终兜底）
@@ -28,6 +29,7 @@ import static com.hmdp.utils.RedisConstants.*;
  */
 @Slf4j
 @Component
+@ConditionalOnProperty(name = "hmdp.cache.invalidation-mode", havingValue = "redis-list")
 public class CacheDelCompensateTask {
 
     @Resource

@@ -16,6 +16,17 @@ services:
       timeout: 5s
       retries: 20
 
+  mysql-migrate:
+    image: mysql:8.0
+    environment:
+      MYSQL_PWD: root
+    volumes:
+      - ./docker/mysql/migrate_rocketmq_transaction_log.sql:/migrations/01-rocketmq-transaction-log.sql:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: sh -c "mysql -h mysql -uroot hmdp < /migrations/01-rocketmq-transaction-log.sql"
+
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "123456"]
@@ -39,6 +50,56 @@ services:
       - -c
       - redis-cli -h redis -a 123456 XGROUP CREATE stream.orders g1 0 MKSTREAM || true
 
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.3.2
+    command: sh mqnamesrv
+    ports:
+      - "9876:9876"
+
+  rocketmq-store-init:
+    image: apache/rocketmq:5.3.2
+    user: root
+    command: sh -c "mkdir -p /home/rocketmq/store && chown -R 3000:3000 /home/rocketmq/store"
+    volumes:
+      - hmdp_rocketmq_broker_store:/home/rocketmq/store
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.3.2
+    command: sh mqbroker -c /home/rocketmq/rocketmq-5.3.2/conf/broker.conf
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+      - "10912:10912"
+    volumes:
+      - ./docker/rocketmq/broker.conf:/home/rocketmq/rocketmq-5.3.2/conf/broker.conf:ro
+      - hmdp_rocketmq_broker_store:/home/rocketmq/store
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_started
+      rocketmq-store-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "sh /home/rocketmq/rocketmq-5.3.2/bin/mqadmin clusterList -n rocketmq-namesrv:9876 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  rocketmq-init:
+    image: apache/rocketmq:5.3.2
+    depends_on:
+      rocketmq-broker:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >-
+        sh /home/rocketmq/rocketmq-5.3.2/bin/mqadmin updateTopic -n rocketmq-namesrv:9876 -c DefaultCluster -t lifehub-seckill-order-tx -a +message.type=TRANSACTION &&
+        sh /home/rocketmq/rocketmq-5.3.2/bin/mqadmin updateTopic -n rocketmq-namesrv:9876 -c DefaultCluster -t lifehub-shop-update-tx -a +message.type=TRANSACTION &&
+        sh /home/rocketmq/rocketmq-5.3.2/bin/mqadmin updateTopic -n rocketmq-namesrv:9876 -c DefaultCluster -t lifehub-shop-cache-delay -a +message.type=DELAY &&
+        sh /home/rocketmq/rocketmq-5.3.2/bin/mqadmin updateTopic -n rocketmq-namesrv:9876 -c DefaultCluster -t lifehub-seckill-order-dlq -a +message.type=NORMAL
+
   backend:
     build:
       context: .
@@ -52,26 +113,31 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: 123456
+      ROCKETMQ_NAME_SERVER: rocketmq-namesrv:9876
+      SECKILL_QUEUE_MODE: ${SECKILL_QUEUE_MODE:-rocketmq}
+      CACHE_INVALIDATION_MODE: ${CACHE_INVALIDATION_MODE:-rocketmq}
       # 图片上传目录：与前端共享同一静态目录（backend 可写，frontend 只读）
       UPLOAD_DIR: /usr/share/nginx/html/imgs
     volumes:
       - ./frontend-public:/usr/share/nginx/html
     depends_on:
-      mysql:
-        condition: service_healthy
+      mysql-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       redis-init:
         condition: service_completed_successfully
+      rocketmq-init:
+        condition: service_completed_successfully
     ports:
-      - "8081:8081"
+      - "${BACKEND_PORT:-18081}:8081"
 
   frontend:
     image: nginx:1.27-alpine
     depends_on:
       - backend
     ports:
-      - "8080:80"
+      - "${FRONTEND_PORT:-18080}:80"
     volumes:
       - ./frontend-public:/usr/share/nginx/html:ro
       - ./docker/nginx.default.conf:/etc/nginx/conf.d/default.conf:ro
@@ -79,3 +145,4 @@ services:
 volumes:
   hmdp_mysql_data:
   hmdp_redis_data:
+  hmdp_rocketmq_broker_store:
